@@ -5,7 +5,7 @@ export default function HomePage() {
     <main className="min-h-screen flex flex-col items-center justify-center bg-white px-6">
       <h1 className="text-4xl font-bold mb-4">BuildaroQ</h1>
       <p className="text-gray-600 mb-8">
-        Slimme offertes & facturatie voor installateurs.
+        Slimme offertes & facturatie voor harde werkers.
       </p>
 
       <div className="flex gap-4">
