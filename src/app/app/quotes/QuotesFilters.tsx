@@ -1,24 +1,24 @@
 "use client";
 
-// src/app/app/invoices/InvoicesFilters.tsx
+// src/app/app/quotes/QuotesFilters.tsx
 
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import type { SourceFilter, StatusFilter } from "./_lib/invoiceFilters";
-import { buildHref, clampIsoDate, parseSource, parseStatus } from "./_lib/invoiceFilters";
+import type { BilledFilter, QuoteStatus } from "./_lib/quoteFilters";
+import { buildHref, clampIsoDate, parseBilled, parseStatus } from "./_lib/quoteFilters";
 
-export function InvoicesFilters({
+export function QuotesFilters({
   basePath,
   initialQ,
   initialStatus,
-  initialSource,
+  initialBilled,
   initialFrom,
   initialTo,
 }: {
   basePath: string;
   initialQ: string;
-  initialStatus: StatusFilter;
-  initialSource: SourceFilter;
+  initialStatus: "all" | QuoteStatus;
+  initialBilled: BilledFilter;
   initialFrom: string;
   initialTo: string;
 }) {
@@ -27,35 +27,53 @@ export function InvoicesFilters({
   const [isPending, startTransition] = useTransition();
 
   const [q, setQ] = useState(initialQ);
-  const [status, setStatus] = useState<StatusFilter>(initialStatus);
-  const [source, setSource] = useState<SourceFilter>(initialSource);
+  const [status, setStatus] = useState<"all" | QuoteStatus>(initialStatus);
+  const [billed, setBilled] = useState<BilledFilter>(initialBilled);
   const [from, setFrom] = useState(initialFrom);
   const [to, setTo] = useState(initialTo);
 
-  // Sync bij back/forward (zoals QuotesFilters)
+  // Sync bij back/forward
   useEffect(() => {
     setQ((sp.get("q") ?? "").trim());
     setStatus(parseStatus(sp.get("status") ?? undefined));
-    setSource(parseSource(sp.get("source") ?? undefined));
+    setBilled(parseBilled(sp.get("billed") ?? undefined));
     setFrom(clampIsoDate(sp.get("from") ?? ""));
     setTo(clampIsoDate(sp.get("to") ?? ""));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sp]);
 
-  function go(next: Partial<{ q: string; status: StatusFilter; source: SourceFilter; from: string; to: string }>) {
+  const hasActiveFilters = useMemo(() => {
+    return Boolean(q || status !== "all" || billed !== "all" || from || to);
+  }, [q, status, billed, from, to]);
+
+  function go(
+    next: Partial<{
+      q: string;
+      status: "all" | QuoteStatus;
+      billed: BilledFilter;
+      from: string;
+      to: string;
+    }>
+  ) {
+    const nextQ = next.q ?? q;
+    const nextStatus = next.status ?? status;
+    const nextBilled = next.billed ?? billed;
+    const nextFrom = next.from ?? from;
+    const nextTo = next.to ?? to;
+
     const href = buildHref(basePath, {
-      q: (next.q ?? q).trim(),
-      status: next.status ?? status,
-      source: next.source ?? source,
-      from: clampIsoDate(next.from ?? from),
-      to: clampIsoDate(next.to ?? to),
+      q: nextQ,
+      status: nextStatus,
+      billed: nextBilled,
+      from: nextFrom,
+      to: nextTo,
       page: 1,
     });
 
     startTransition(() => router.replace(href));
   }
 
-  // Debounce search (zoals QuotesFilters)
+  // Debounce search
   const debounceRef = useRef<number | null>(null);
   useEffect(() => {
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
@@ -77,16 +95,17 @@ export function InvoicesFilters({
 
   return (
     <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm overflow-hidden">
-      {/* Zelfde grid als QuotesFilters */}
-      <div
-        className="
-          grid gap-4
-          grid-cols-1
-          lg:grid-cols-[minmax(280px,1fr)_80px_140px_160px_150px]
-          lg:grid-rows-[auto_auto]
-          lg:items-start
-        "
-      >
+      {/* Mobile/tablet: stack. Desktop: strict grid to prevent overlap */}
+<div
+  className="
+    grid gap-4
+    grid-cols-1
+    lg:grid-cols-[minmax(280px,1fr)_80px_140px_160px_150px]
+    lg:grid-rows-[auto_auto]
+    lg:items-start
+  "
+>
+
         {/* Zoeken */}
         <div className="lg:col-start-1 lg:row-start-1">
           <label className="block text-xs font-medium text-zinc-600 mb-1">Zoeken</label>
@@ -94,7 +113,7 @@ export function InvoicesFilters({
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Zoek op factuurnummer of klant…"
+              placeholder="Zoek op offertenummer of klant…"
               className={`${inputCls} pr-10`}
             />
             {q && (
@@ -112,20 +131,25 @@ export function InvoicesFilters({
               </button>
             )}
           </div>
-          <div className="text-xs text-zinc-500 mt-2">Filters worden automatisch toegepast.</div>
         </div>
 
-        {/* Reset (zelfde label truc als quotes) */}
+        {/* Reset */}
         <div className="lg:col-start-2 lg:row-start-1">
-          <label className="block text-xs font-medium text-transparent mb-1">Reset</label>
-          <button
-            type="button"
-            onClick={() => startTransition(() => router.replace(basePath))}
-            className="h-11 w-full rounded-xl border border-zinc-300 bg-white text-sm hover:bg-zinc-50 transition"
-          >
-            Reset
-          </button>
-        </div>
+  {/* exact dezelfde label structuur als andere velden */}
+  <label className="block text-xs font-medium text-transparent mb-1">
+    Reset
+  </label>
+
+  <button
+    type="button"
+    onClick={() => startTransition(() => router.replace(basePath))}
+    className="h-11 w-full rounded-xl border border-zinc-300 bg-white text-sm hover:bg-zinc-50 transition"
+  >
+    Reset
+  </button>
+</div>
+
+
 
         {/* Status */}
         <div className="lg:col-start-3 lg:row-start-1">
@@ -140,34 +164,32 @@ export function InvoicesFilters({
             className={selectCls}
           >
             <option value="">Alle statussen</option>
-            <option value="open">Open</option>
             <option value="draft">Concept</option>
-            <option value="sent">Verstuurd</option>
-            <option value="paid">Betaald</option>
-            <option value="overdue">Te laat</option>
-            <option value="cancelled">Geannuleerd</option>
+            <option value="sent">Verzonden</option>
+            <option value="accepted">Geaccepteerd</option>
+            <option value="declined">Afgewezen</option>
           </select>
         </div>
 
-        {/* Bron */}
+        {/* Factuur */}
         <div className="lg:col-start-4 lg:row-start-1">
-          <label className="block text-xs font-medium text-zinc-600 mb-1">Bron</label>
+          <label className="block text-xs font-medium text-zinc-600 mb-1">Factuur</label>
           <select
-            value={source === "all" ? "" : source}
+            value={billed === "all" ? "" : billed}
             onChange={(e) => {
-              const v = parseSource(e.target.value || "all");
-              setSource(v);
-              go({ source: v });
+              const v = parseBilled(e.target.value || "all");
+              setBilled(v);
+              go({ billed: v });
             }}
             className={selectCls}
           >
             <option value="">Alles</option>
-            <option value="quote">Van offerte</option>
-            <option value="manual">Losse facturen</option>
+            <option value="yes">Gefactureerd</option>
+            <option value="no">Niet gefactureerd</option>
           </select>
         </div>
 
-        {/* Van / Tot */}
+        {/* Van */}
         <div className="lg:col-start-5 lg:row-start-1">
           <label className="block text-xs font-medium text-zinc-600 mb-1">Van</label>
           <input
@@ -182,6 +204,14 @@ export function InvoicesFilters({
           />
         </div>
 
+        {/* Hint onder Zoeken */}
+        <div className="lg:col-start-1 lg:row-start-2">
+          <div className="text-xs text-zinc-500">
+            {isPending ? "Bezig met laden…" : "Filters worden automatisch toegepast."}
+          </div>
+        </div>
+
+        {/* Tot onder Van */}
         <div className="lg:col-start-5 lg:row-start-2">
           <label className="block text-xs font-medium text-zinc-600 mb-1">Tot</label>
           <input
@@ -196,8 +226,6 @@ export function InvoicesFilters({
           />
         </div>
       </div>
-
-      {isPending ? <div className="text-xs text-zinc-500 mt-3">Bezig met filteren…</div> : null}
     </div>
   );
 }

@@ -23,7 +23,7 @@ export default async function CustomersPage() {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold">Klanten</h1>
+          <h1 className="text-4xl font-bold underline">Klanten</h1>
           <p className="text-gray-600">Beheer je klanten.</p>
         </div>
 

@@ -8,12 +8,12 @@ type InvoiceRow = {
   currency: string;
 };
 
-type InvoiceTotalsRow = {
+type InvoiceItemRow = {
   invoice_id: string;
-  currency: string;
-  prices_include_vat: boolean | null;
+  qty: number | string | null;
+  unit_price: number | string | null;
+  vat_type: string | null;
   vat_rate: number | string | null;
-  subtotal: number | string | null;
 };
 
 function toNumber(v: unknown): number {
@@ -22,25 +22,56 @@ function toNumber(v: unknown): number {
   return 0;
 }
 
+function round2(n: number) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
 function formatMoney(value: number, currency: string) {
   return new Intl.NumberFormat("nl-NL", {
     style: "currency",
     currency: currency || "EUR",
-  }).format(value);
+  }).format(Number.isFinite(value) ? value : 0);
 }
 
-function calcTotals(subtotal: number, vatRate: number, pricesIncludeVat: boolean) {
-  if (subtotal <= 0) return { subtotal, vatAmount: 0, total: 0 };
+function isZeroVatType(vatType: string) {
+  return (
+    vatType === "NL_REVERSE_CHARGE" ||
+    vatType === "EU_B2B_REVERSE_CHARGE" ||
+    vatType === "NON_EU_OUTSIDE_SCOPE"
+  );
+}
 
-  if (pricesIncludeVat) {
-    const divisor = 1 + vatRate / 100;
-    const net = subtotal / divisor;
-    const vatAmount = subtotal - net;
-    return { subtotal, vatAmount, total: subtotal };
-  } else {
-    const vatAmount = subtotal * (vatRate / 100);
-    return { subtotal, vatAmount, total: subtotal + vatAmount };
+function resolveVatRate(vatType: string, vatRate: unknown) {
+  if (isZeroVatType(vatType)) return 0;
+  const r = toNumber(vatRate);
+  if (Number.isFinite(r) && r >= 0) return r;
+  if (vatType === "NL_9_WONING") return 9;
+  return 21;
+}
+
+function calcInvoiceTotalFromItems(items: InvoiceItemRow[]) {
+  let subtotal = 0;
+  let vatAmount = 0;
+
+  for (const it of items) {
+    const qty = toNumber(it.qty);
+    const price = toNumber(it.unit_price);
+    if (!Number.isFinite(qty) || !Number.isFinite(price)) continue;
+
+    const net = round2(qty * price);
+    subtotal = round2(subtotal + net);
+
+    const vatType = String(it.vat_type ?? "NL_21");
+    const rate = resolveVatRate(vatType, it.vat_rate);
+    const vat = round2(net * (rate / 100));
+    vatAmount = round2(vatAmount + vat);
   }
+
+  return {
+    subtotal,
+    vatAmount,
+    total: round2(subtotal + vatAmount),
+  };
 }
 
 export default async function AppPage() {
@@ -76,7 +107,7 @@ export default async function AppPage() {
     .gte("paid_at", startOfMonth.toISOString())
     .lt("paid_at", nextMonth.toISOString());
 
-  // 4) Haal relevante invoices + totals op om bedragen te kunnen rekenen
+  // 4) Invoices ophalen (voor bedragen)
   const { data: invs } = await sb
     .from("invoices")
     .select("id,status,due_date,currency")
@@ -84,45 +115,49 @@ export default async function AppPage() {
     .order("due_date", { ascending: true, nullsFirst: false });
 
   const invoices: InvoiceRow[] = (invs ?? []) as InvoiceRow[];
-
   const ids = invoices.map((i) => i.id);
 
-  // Als er nog niets is, voorkom "in()" issues
-  const { data: totalsRaw } =
+  // 5) Haal alle items van die invoices op (per-regel btw)
+  // NB: dit is correct bij gemixte tarieven; later kun je dit optimaliseren met een view.
+  const { data: itemsRaw, error: itemsErr } =
     ids.length === 0
-      ? { data: [] as any[] }
+      ? { data: [] as any[], error: null as any }
       : await sb
-          .from("invoice_totals")
-          .select("invoice_id,currency,prices_include_vat,vat_rate,subtotal")
+          .from("invoice_items")
+          .select("invoice_id,qty,unit_price,vat_type,vat_rate")
           .in("invoice_id", ids);
 
-  const totalsById = new Map<string, InvoiceTotalsRow>();
-  for (const row of (totalsRaw ?? []) as InvoiceTotalsRow[]) {
-    totalsById.set(row.invoice_id, row);
+  if (itemsErr) {
+    console.error("invoice_items load failed:", itemsErr.message);
   }
 
-  // 5) Bedragen optellen
+  const items = (itemsRaw ?? []) as InvoiceItemRow[];
+
+  // group items by invoice_id
+  const itemsByInvoice = new Map<string, InvoiceItemRow[]>();
+  for (const it of items) {
+    const key = it.invoice_id;
+    if (!itemsByInvoice.has(key)) itemsByInvoice.set(key, []);
+    itemsByInvoice.get(key)!.push(it);
+  }
+
+  // 6) Bedragen optellen (open/overdue)
   let openAmount = 0;
   let overdueAmount = 0;
-  let paidThisMonthAmount = 0;
 
   for (const inv of invoices) {
-    const t = totalsById.get(inv.id);
-    const subtotal = toNumber(t?.subtotal ?? 0);
-    const vatRate = toNumber(t?.vat_rate ?? 21);
-    const pricesIncludeVat = !!t?.prices_include_vat;
+    if (inv.status !== "sent" && inv.status !== "overdue") continue;
 
-    const { total } = calcTotals(subtotal, vatRate, pricesIncludeVat);
+    const invItems = itemsByInvoice.get(inv.id) ?? [];
+    const { total } = calcInvoiceTotalFromItems(invItems);
 
-    if (inv.status === "sent") openAmount += total;
+    openAmount = round2(openAmount + total);
     if (inv.status === "overdue") {
-      openAmount += total;
-      overdueAmount += total;
+      overdueAmount = round2(overdueAmount + total);
     }
   }
 
-  // Paid this month amount (filter op paid_at)
-  // We doen dit apart, want hierboven pakten we paid invoices zonder paid_at filter.
+  // 7) Betaald deze maand bedrag (paid_at filter)
   const { data: paidIdsRaw } = await sb
     .from("invoices")
     .select("id")
@@ -132,22 +167,33 @@ export default async function AppPage() {
 
   const paidIds = (paidIdsRaw ?? []).map((r: { id: string }) => r.id);
 
+  let paidThisMonthAmount = 0;
   if (paidIds.length > 0) {
-    const { data: paidTotalsRaw } = await sb
-      .from("invoice_totals")
-      .select("invoice_id,prices_include_vat,vat_rate,subtotal")
+    // items van paid invoices (subset)
+    const { data: paidItemsRaw, error: paidItemsErr } = await sb
+      .from("invoice_items")
+      .select("invoice_id,qty,unit_price,vat_type,vat_rate")
       .in("invoice_id", paidIds);
 
-    for (const row of (paidTotalsRaw ?? []) as InvoiceTotalsRow[]) {
-      const subtotal = toNumber(row.subtotal ?? 0);
-      const vatRate = toNumber(row.vat_rate ?? 21);
-      const pricesIncludeVat = !!row.prices_include_vat;
-      const { total } = calcTotals(subtotal, vatRate, pricesIncludeVat);
-      paidThisMonthAmount += total;
+    if (paidItemsErr) {
+      console.error("paid invoice_items load failed:", paidItemsErr.message);
+    } else {
+      const paidItems = (paidItemsRaw ?? []) as InvoiceItemRow[];
+      const paidItemsByInvoice = new Map<string, InvoiceItemRow[]>();
+      for (const it of paidItems) {
+        if (!paidItemsByInvoice.has(it.invoice_id)) paidItemsByInvoice.set(it.invoice_id, []);
+        paidItemsByInvoice.get(it.invoice_id)!.push(it);
+      }
+
+      for (const pid of paidIds) {
+        const invItems = paidItemsByInvoice.get(pid) ?? [];
+        const { total } = calcInvoiceTotalFromItems(invItems);
+        paidThisMonthAmount = round2(paidThisMonthAmount + total);
+      }
     }
   }
 
-  // 6) Valuta (MVP: 1 valuta, neem EUR fallback)
+  // 8) Valuta (MVP: 1 valuta, neem EUR fallback)
   const currency = invoices[0]?.currency ?? "EUR";
 
   return (
@@ -187,9 +233,7 @@ export default async function AppPage() {
           <div className="mt-2 text-3xl font-bold">
             {formatMoney(paidThisMonthAmount, currency)}
           </div>
-          <div className="mt-1 text-sm text-gray-600">
-            {paidThisMonthCount ?? 0} facturen
-          </div>
+          <div className="mt-1 text-sm text-gray-600">{paidThisMonthCount ?? 0} facturen</div>
           <div className="mt-4">
             <Link className="underline" href="/app/invoices">
               Bekijk betalingen
@@ -211,9 +255,7 @@ export default async function AppPage() {
             href="/app/customers"
           >
             <b>Klanten</b>
-            <div className="text-sm text-gray-600">
-              Voeg klanten toe en beheer gegevens.
-            </div>
+            <div className="text-sm text-gray-600">Voeg klanten toe en beheer gegevens.</div>
           </Link>
 
           <Link
@@ -221,9 +263,7 @@ export default async function AppPage() {
             href="/app/quotes"
           >
             <b>Offertes</b>
-            <div className="text-sm text-gray-600">
-              Maak offertes en download PDF.
-            </div>
+            <div className="text-sm text-gray-600">Maak offertes en download PDF.</div>
           </Link>
         </div>
       </div>

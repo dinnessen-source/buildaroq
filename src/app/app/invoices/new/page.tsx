@@ -26,13 +26,7 @@ export default async function NewInvoicePage() {
       throw new Error("Kies een klant.");
     }
 
-    // 1) Factuurnummer genereren
-    const { data: invoiceNumber, error: numErr } = await sb2.rpc("next_invoice_number");
-    if (numErr || !invoiceNumber) {
-      throw new Error(numErr?.message ?? "Kon geen factuurnummer genereren.");
-    }
-
-    // 2) Payment terms ophalen (default 14)
+    // 1) Payment terms ophalen (default 14)
     const { data: bs, error: bsErr } = await sb2
       .from("billing_settings")
       .select("payment_terms_days")
@@ -47,18 +41,18 @@ export default async function NewInvoicePage() {
     const days = Number(bs?.payment_terms_days ?? 14);
     const safeDays = Number.isFinite(days) && days > 0 ? days : 14;
 
-    // 3) due_date = vandaag + betaaltermijn
+    // 2) due_date = vandaag + betaaltermijn
     const due = new Date();
     due.setDate(due.getDate() + safeDays);
     const due_date = due.toISOString().slice(0, 10); // YYYY-MM-DD
 
-    // 4) Insert invoice
+    // 3) Insert invoice (✅ draft zonder factuurnummer)
     const { data: inserted, error: insErr } = await sb2
       .from("invoices")
       .insert({
         user_id: user.id,
         customer_id,
-        invoice_number: invoiceNumber,
+        invoice_number: null, // ✅ nummer pas bij "sent"
         status: "draft",
         due_date,
       })

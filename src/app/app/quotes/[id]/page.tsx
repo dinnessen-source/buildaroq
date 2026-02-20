@@ -17,8 +17,8 @@ type Quote = {
   notes: string | null;
   footer: string | null;
   currency: string;
-  vat_rate: number | null;
-  prices_include_vat: boolean | null;
+  vat_rate: number | null; // legacy (not used for calc anymore)
+  prices_include_vat: boolean | null; // legacy (not used for calc anymore)
   created_at: string;
 };
 
@@ -35,14 +35,15 @@ type QuoteItem = {
   description: string;
   qty: number;
   unit: string | null;
-  unit_price: number;
-  vat_rate: number | null;
+  unit_price: number; // treated as EXCL VAT
+  vat_type: string | null;
+  vat_rate: number | null; // snapshot %
 };
 
 type BillingSettings = {
   currency: string;
-  default_vat_rate: number;
-  prices_include_vat: boolean;
+  default_vat_rate: number; // legacy default; used as fallback only
+  prices_include_vat: boolean; // legacy (display only)
   quote_footer: string | null;
 };
 
@@ -52,11 +53,15 @@ function toNumber(v: unknown): number {
   return 0;
 }
 
+function round2(n: number) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
 function formatMoney(value: number, currency: string) {
   return new Intl.NumberFormat("nl-NL", {
     style: "currency",
     currency: currency || "EUR",
-  }).format(value);
+  }).format(Number.isFinite(value) ? value : 0);
 }
 
 function badgeClasses(status: QuoteStatus) {
@@ -72,6 +77,22 @@ function badgeClasses(status: QuoteStatus) {
     default:
       return "bg-gray-100 text-gray-800";
   }
+}
+
+function isZeroVatType(vatType: string) {
+  return (
+    vatType === "NL_REVERSE_CHARGE" ||
+    vatType === "EU_B2B_REVERSE_CHARGE" ||
+    vatType === "NON_EU_OUTSIDE_SCOPE"
+  );
+}
+
+function resolveVatRate(vatType: string, vatRate: number | null, defaultVatRate: number) {
+  if (isZeroVatType(vatType)) return 0;
+  if (typeof vatRate === "number" && Number.isFinite(vatRate) && vatRate >= 0) return vatRate;
+  if (vatType === "NL_9_WONING") return 9;
+  // fallback for old items:
+  return Number.isFinite(defaultVatRate) ? defaultVatRate : 21;
 }
 
 export default async function QuoteDetailPage({
@@ -144,7 +165,6 @@ export default async function QuoteDetailPage({
     prices_include_vat: quoteRaw.prices_include_vat,
   };
 
-  // extra safety (RLS zou dit al doen)
   if (quote.user_id !== user.id) return notFound();
 
   // 2) Customer
@@ -156,17 +176,17 @@ export default async function QuoteDetailPage({
 
   const customer: Customer | null = customerRaw ?? null;
 
-  // ✅ Bestaat er al een factuur voor deze offerte?
+  // Linked invoice?
   const { data: linkedInvoice } = await sb
     .from("invoices")
     .select("id, invoice_number")
     .eq("quote_id", quote.id)
     .maybeSingle();
 
-  // 3) Items
+  // 3) Items (with vat_type/vat_rate)
   const { data: itemsRaw, error: itemsErr } = await sb
     .from("quote_items")
-    .select("id,description,qty,unit,unit_price,vat_rate")
+    .select("id,description,qty,unit,unit_price,vat_type,vat_rate")
     .eq("quote_id", quote.id)
     .order("created_at", { ascending: true });
 
@@ -187,6 +207,7 @@ export default async function QuoteDetailPage({
     ...it,
     qty: toNumber(it.qty),
     unit_price: toNumber(it.unit_price),
+    vat_type: (it.vat_type ?? "NL_21") as string,
     vat_rate: it.vat_rate === null ? null : toNumber(it.vat_rate),
   }));
 
@@ -208,24 +229,49 @@ export default async function QuoteDetailPage({
 
   const currency = quote.currency || billingSettings?.currency || "EUR";
   const defaultVatRate = quote.vat_rate ?? billingSettings?.default_vat_rate ?? 21;
-  const pricesIncludeVat =
-    quote.prices_include_vat ?? billingSettings?.prices_include_vat ?? false;
 
-  // 5) Totals (MVP: 1 vat rate)
-  const subtotal = items.reduce((sum, it) => sum + it.qty * it.unit_price, 0);
+  // 5) Totals (multi VAT, per line) - prices are EXCL VAT
+  let subtotal = 0;
+  const vatMap = new Map<number, { base: number; vat: number }>();
 
-  let vatAmount = 0;
-  let total = 0;
+  let hasReverseNl = false;
+  let hasReverseEu = false;
+  let hasOutsideEu = false;
 
-  if (pricesIncludeVat) {
-    const divisor = 1 + defaultVatRate / 100;
-    const net = subtotal / divisor;
-    vatAmount = subtotal - net;
-    total = subtotal;
-  } else {
-    vatAmount = subtotal * (defaultVatRate / 100);
-    total = subtotal + vatAmount;
+  for (const it of items) {
+    const net = round2(it.qty * it.unit_price);
+    subtotal = round2(subtotal + net);
+
+    const vatType = String(it.vat_type ?? "NL_21");
+    const rate = resolveVatRate(vatType, it.vat_rate, defaultVatRate);
+
+    if (vatType === "NL_REVERSE_CHARGE") hasReverseNl = true;
+    if (vatType === "EU_B2B_REVERSE_CHARGE") hasReverseEu = true;
+    if (vatType === "NON_EU_OUTSIDE_SCOPE") hasOutsideEu = true;
+
+    const vat = round2(net * (rate / 100));
+
+    if (!vatMap.has(rate)) vatMap.set(rate, { base: 0, vat: 0 });
+    const row = vatMap.get(rate)!;
+    row.base = round2(row.base + net);
+    row.vat = round2(row.vat + vat);
   }
+
+  const vatBreakdown = Array.from(vatMap.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([rate, v]) => ({ rate, base: v.base, vat: v.vat }));
+
+  const vatAmount = round2(vatBreakdown.reduce((s, r) => s + r.vat, 0));
+  const total = round2(subtotal + vatAmount);
+
+  const nonZeroRates = vatBreakdown.filter((r) => r.rate !== 0).map((r) => r.rate);
+  const uniqueNonZeroRates = Array.from(new Set(nonZeroRates));
+  const multipleVatRates = uniqueNonZeroRates.length > 1;
+
+  const notices: string[] = [];
+  if (hasReverseNl) notices.push("BTW verlegd (onderaanneming/bouw).");
+  if (hasReverseEu) notices.push("BTW verlegd – intracommunautaire dienst (EU B2B).");
+  if (hasOutsideEu) notices.push("Plaats van dienst buiten Nederland (buiten EU).");
 
   const footer = quote.footer ?? billingSettings?.quote_footer ?? null;
 
@@ -269,7 +315,6 @@ export default async function QuoteDetailPage({
 
           <QuoteStatusActions quoteId={quote.id} status={quote.status} />
 
-          {/* ✅ Als er al een factuur is: toon link */}
           {linkedInvoice?.id ? (
             <Link
               href={`/app/invoices/${linkedInvoice.id}`}
@@ -279,7 +324,6 @@ export default async function QuoteDetailPage({
             </Link>
           ) : null}
 
-          {/* ✅ Alleen tonen als accepted en nog niet gefactureerd */}
           {quote.status === "accepted" && !linkedInvoice?.id ? (
             <form
               action={async () => {
@@ -325,8 +369,11 @@ export default async function QuoteDetailPage({
         <div className="p-6 border-b">
           <div className="text-sm font-semibold">Regels</div>
           <div className="text-sm text-gray-600 mt-1">
-            BTW: {defaultVatRate}% •{" "}
-            {pricesIncludeVat ? "prijzen incl. BTW" : "prijzen excl. BTW"}
+            BTW:{" "}
+            {multipleVatRates
+              ? "meerdere tarieven"
+              : `${uniqueNonZeroRates[0] ?? 0}%`}{" "}
+            • prijzen excl. BTW
           </div>
         </div>
 
@@ -390,21 +437,41 @@ export default async function QuoteDetailPage({
         <div className="p-6 border-t bg-gray-50">
           <div className="ml-auto w-full max-w-sm space-y-2 text-sm">
             <div className="flex items-center justify-between">
-              <div className="text-gray-700">
-                {pricesIncludeVat ? "Subtotaal (incl.)" : "Subtotaal"}
-              </div>
+              <div className="text-gray-700">Subtotaal</div>
               <div className="font-semibold">{formatMoney(subtotal, currency)}</div>
             </div>
 
-            <div className="flex items-center justify-between">
-              <div className="text-gray-700">BTW ({defaultVatRate}%)</div>
-              <div className="font-semibold">{formatMoney(vatAmount, currency)}</div>
-            </div>
+            {/* Moneybird/Exact stijl: BTW % over grondslag = btw */}
+            {vatBreakdown.filter((r) => r.rate !== 0).length > 0 ? (
+              vatBreakdown
+                .filter((r) => r.rate !== 0)
+                .map((r) => (
+                  <div key={r.rate} className="flex items-center justify-between">
+                    <div className="text-gray-700">
+                      BTW {r.rate}% over {formatMoney(r.base, currency)}
+                    </div>
+                    <div className="font-semibold">{formatMoney(r.vat, currency)}</div>
+                  </div>
+                ))
+            ) : (
+              <div className="flex items-center justify-between">
+                <div className="text-gray-700">BTW</div>
+                <div className="font-semibold">{formatMoney(0, currency)}</div>
+              </div>
+            )}
 
             <div className="flex items-center justify-between text-base">
               <div className="font-bold">Totaal</div>
               <div className="font-bold">{formatMoney(total, currency)}</div>
             </div>
+
+            {notices.length ? (
+              <div className="mt-3 text-xs text-gray-600 space-y-1">
+                {notices.map((n, i) => (
+                  <div key={i}>{n}</div>
+                ))}
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

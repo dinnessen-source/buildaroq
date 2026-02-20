@@ -4,6 +4,27 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabaseBrowser } from "../../../../lib/supabase/browser";
 
+type VatType =
+  | "NL_21"
+  | "NL_9_WONING"
+  | "NL_REVERSE_CHARGE"
+  | "EU_B2B_REVERSE_CHARGE"
+  | "NON_EU_OUTSIDE_SCOPE"
+  | "FOREIGN_LOCAL_VAT";
+
+const VAT_OPTIONS: Array<{ value: VatType; label: string; rate: number }> = [
+  { value: "NL_21", label: "NL 21% btw", rate: 21 },
+  { value: "NL_9_WONING", label: "NL 9% btw (woning > 2 jaar)", rate: 9 },
+  { value: "NL_REVERSE_CHARGE", label: "NL btw verlegd (bouw/onderaanneming)", rate: 0 },
+  { value: "EU_B2B_REVERSE_CHARGE", label: "EU B2B btw verlegd (ICP)", rate: 0 },
+  { value: "NON_EU_OUTSIDE_SCOPE", label: "Buiten EU: plaats van dienst buiten NL", rate: 0 },
+  { value: "FOREIGN_LOCAL_VAT", label: "Buitenlands lokaal btw-tarief (handmatig)", rate: 0 },
+];
+
+function defaultVatRateForType(vatType: VatType): number {
+  return VAT_OPTIONS.find((o) => o.value === vatType)?.rate ?? 21;
+}
+
 export function AddQuoteItemForm({ quoteId }: { quoteId: string }) {
   const router = useRouter();
   const sb = supabaseBrowser();
@@ -12,8 +33,17 @@ export function AddQuoteItemForm({ quoteId }: { quoteId: string }) {
   const [qty, setQty] = useState("1");
   const [unit, setUnit] = useState("");
   const [unitPrice, setUnitPrice] = useState("0");
+
+  const [vatType, setVatType] = useState<VatType>("NL_21");
+  const [vatRate, setVatRate] = useState<string>("21");
+
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  function onChangeVatType(next: VatType) {
+    setVatType(next);
+    setVatRate(String(defaultVatRateForType(next)));
+  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -23,6 +53,7 @@ export function AddQuoteItemForm({ quoteId }: { quoteId: string }) {
     const desc = description.trim();
     const qtyNum = Number(qty);
     const priceNum = Number(unitPrice);
+    const vatRateNum = Number(vatRate);
 
     if (!desc) {
       setError("Omschrijving is verplicht.");
@@ -36,6 +67,11 @@ export function AddQuoteItemForm({ quoteId }: { quoteId: string }) {
     }
     if (!Number.isFinite(priceNum) || priceNum < 0) {
       setError("Prijs moet 0 of hoger zijn.");
+      setLoading(false);
+      return;
+    }
+    if (!Number.isFinite(vatRateNum) || vatRateNum < 0) {
+      setError("BTW % moet 0 of hoger zijn.");
       setLoading(false);
       return;
     }
@@ -58,6 +94,10 @@ export function AddQuoteItemForm({ quoteId }: { quoteId: string }) {
       qty: qtyNum,
       unit: unit.trim() || null,
       unit_price: priceNum,
+
+      // nieuw:
+      vat_type: vatType,
+      vat_rate: vatRateNum,
     });
 
     if (insErr) {
@@ -66,16 +106,18 @@ export function AddQuoteItemForm({ quoteId }: { quoteId: string }) {
       return;
     }
 
-    // reset
     setDescription("");
     setQty("1");
     setUnit("");
     setUnitPrice("0");
+    setVatType("NL_21");
+    setVatRate("21");
     setLoading(false);
 
-    // refresh server component data
     router.refresh();
   }
+
+  const showManualVatRate = vatType === "FOREIGN_LOCAL_VAT";
 
   return (
     <form onSubmit={onSubmit} className="space-y-3">
@@ -86,7 +128,7 @@ export function AddQuoteItemForm({ quoteId }: { quoteId: string }) {
       ) : null}
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-12">
-        <div className="md:col-span-6">
+        <div className="md:col-span-5">
           <label className="block text-xs font-semibold text-gray-600 mb-1">
             Omschrijving
           </label>
@@ -94,7 +136,7 @@ export function AddQuoteItemForm({ quoteId }: { quoteId: string }) {
             className="w-full rounded-xl border px-3 py-2"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="Bijv. Installatie groepenkast"
+            placeholder="Bijv. Arbeid schilderwerk / Materiaal"
           />
         </div>
 
@@ -122,9 +164,9 @@ export function AddQuoteItemForm({ quoteId }: { quoteId: string }) {
           />
         </div>
 
-        <div className="md:col-span-2">
+        <div className="md:col-span-3">
           <label className="block text-xs font-semibold text-gray-600 mb-1">
-            Prijs
+            Prijs (excl.)
           </label>
           <input
             className="w-full rounded-xl border px-3 py-2 text-right"
@@ -132,6 +174,39 @@ export function AddQuoteItemForm({ quoteId }: { quoteId: string }) {
             onChange={(e) => setUnitPrice(e.target.value)}
             inputMode="decimal"
           />
+        </div>
+
+        <div className="md:col-span-7">
+          <label className="block text-xs font-semibold text-gray-600 mb-1">
+            BTW type
+          </label>
+          <select
+            className="w-full rounded-xl border px-3 py-2"
+            value={vatType}
+            onChange={(e) => onChangeVatType(e.target.value as VatType)}
+          >
+            {VAT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="md:col-span-5">
+          <label className="block text-xs font-semibold text-gray-600 mb-1">
+            BTW %
+          </label>
+          <input
+            className="w-full rounded-xl border px-3 py-2 text-right"
+            value={vatRate}
+            onChange={(e) => setVatRate(e.target.value)}
+            inputMode="decimal"
+            disabled={!showManualVatRate && vatType !== "NL_21" && vatType !== "NL_9_WONING"}
+          />
+          <p className="mt-1 text-[11px] text-gray-500">
+            Voor verlegd/buitenland is dit meestal 0%. Kies “handmatig” als je lokaal btw moet rekenen.
+          </p>
         </div>
       </div>
 

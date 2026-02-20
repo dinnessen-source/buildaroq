@@ -1,14 +1,18 @@
 import React from "react";
-import {
-  Document,
-  Page,
-  Text,
-  View,
-  StyleSheet,
-} from "@react-pdf/renderer";
+import { Document, Page, Text, View, StyleSheet, Image } from "@react-pdf/renderer";
+
+type VatBreakdownRow = {
+  rate: number; // 0, 9, 21, ...
+  base: number; // grondslag
+  vat: number;  // btw-bedrag
+};
 
 export type InvoicePdfData = {
   brandName: string;
+
+  // ✅ data-uri vanuit je invoice route.ts (zelfde als quote)
+  logoDataUri?: string | null;
+
   invoice: {
     id: string;
     invoice_number: string;
@@ -18,6 +22,7 @@ export type InvoicePdfData = {
     created_at: string;
     due_date: string | null;
   };
+
   seller: {
     company_name: string | null;
     company_email: string | null;
@@ -31,194 +36,310 @@ export type InvoicePdfData = {
     chamber_of_commerce: string | null;
     iban: string | null;
   };
+
   customer: {
     name: string;
     email: string | null;
     phone: string | null;
     address: string | null;
   } | null;
+
   items: Array<{
     description: string;
     qty: number;
     unit: string | null;
     unit_price: number;
+    vat_type?: string | null;
+    vat_rate?: number | null;
   }>;
+
   totals: {
     currency: string;
     prices_include_vat: boolean;
-    vat_rate: number;
+    vat_rate?: number; // fallback
     subtotal: number;
     vat_amount: number;
     total: number;
+    vat_breakdown?: VatBreakdownRow[];
+    notices?: string[];
   };
 };
 
-function money(value: number, currency: string) {
-  return new Intl.NumberFormat("nl-NL", { style: "currency", currency }).format(value);
-}
+/* =========================================================
+   🔧 LOGO INSTELLINGEN – HIER AANPASSEN (zelfde als Quote)
+   ========================================================= */
+const LOGO_WIDTH = 340;
+const LOGO_HEIGHT = 80;
+const LOGO_OFFSET_LEFT = -6;
 
 const styles = StyleSheet.create({
-  page: { padding: 32, fontSize: 10, fontFamily: "Helvetica" },
-  row: { flexDirection: "row", justifyContent: "space-between", gap: 12 },
-  h1: { fontSize: 18, fontWeight: "bold" },
-  h2: { fontSize: 11, fontWeight: "bold" },
-  muted: { color: "#555" },
-  card: { border: "1px solid #E5E7EB", borderRadius: 10, padding: 12 },
-  tableHeader: { flexDirection: "row", borderBottom: "1px solid #E5E7EB", paddingBottom: 6, marginTop: 10 },
-  th: { fontWeight: "bold", color: "#111" },
-  tr: { flexDirection: "row", borderBottom: "1px solid #F1F5F9", paddingVertical: 6 },
-  colDesc: { flex: 6, paddingRight: 10 },
-  colQty: { flex: 1.5, textAlign: "right" },
-  colPrice: { flex: 2, textAlign: "right" },
-  colTotal: { flex: 2, textAlign: "right" },
-  totalsBox: { marginTop: 10, alignSelf: "flex-end", width: 220 },
-  totalsRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 4 },
-  divider: { height: 1, backgroundColor: "#E5E7EB", marginVertical: 10 },
+  page: {
+    paddingTop: 32,
+    paddingHorizontal: 32,
+    paddingBottom: 64,
+    fontSize: 11,
+    fontFamily: "Helvetica",
+    color: "#000",
+  },
+
+  headerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 18,
+    alignItems: "flex-start",
+  },
+
+  logo: {
+    width: LOGO_WIDTH,
+    height: LOGO_HEIGHT,
+    marginLeft: LOGO_OFFSET_LEFT,
+    objectFit: "contain",
+  },
+
+  brandFallback: { fontSize: 18, fontWeight: 700, color: "#000" },
+
+  meta: {
+    fontSize: 11,
+    color: "#000",
+    lineHeight: 1.35,
+    textAlign: "right",
+  },
+
+  section: { marginTop: 10, marginBottom: 10 },
+
+  h2: { fontSize: 11, fontWeight: 700, marginBottom: 6, color: "#000" },
+
+  gridRow: { flexDirection: "row", gap: 16 },
+  box: { flex: 1 },
+
+  tableHeader: {
+    flexDirection: "row",
+    borderBottomWidth: 1,
+    borderBottomColor: "#000",
+    paddingBottom: 6,
+    marginTop: 10,
+  },
+
+  row: {
+    flexDirection: "row",
+    borderBottomWidth: 1,
+    borderBottomColor: "#DDD",
+    paddingVertical: 6,
+  },
+
+  colDesc: { width: "56%" },
+  colQty: { width: "12%", textAlign: "right" },
+  colUnit: { width: "10%", textAlign: "right" },
+  colUnitPrice: { width: "11%", textAlign: "right" },
+  colTotal: { width: "11%", textAlign: "right" },
+
+  totals: { marginTop: 12, alignItems: "flex-end" },
+  totalLine: {
+    flexDirection: "row",
+    width: 240,
+    justifyContent: "space-between",
+    marginTop: 4,
+  },
+
+  noticeBox: {
+    marginTop: 10,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "#DDD",
+  },
+
+  footer: {
+    position: "absolute",
+    left: 32,
+    right: 32,
+    bottom: 20,
+    fontSize: 10.5,
+    color: "#000",
+  },
 });
 
+function round2(n: number): number {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+function money(value: number, currency: string) {
+  const n = Number.isFinite(value) ? value : 0;
+  const formatted = n.toFixed(2);
+  const symbol = currency === "EUR" ? "€" : currency + " ";
+  return `${symbol} ${formatted}`;
+}
+
+function safeLine(...parts: Array<string | null | undefined>) {
+  return parts.filter(Boolean).join(" ");
+}
+
+function formatDateNL(iso: string) {
+  const d = new Date(iso);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${dd}-${mm}-${yyyy}`;
+}
+
+function formatDateOnlyNL(date: string) {
+  const d = new Date(`${date}T00:00:00`);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${dd}-${mm}-${yyyy}`;
+}
+
 export function InvoicePdfDocument({ data }: { data: InvoicePdfData }) {
-  const { invoice, seller, customer, items, totals, brandName } = data;
+  const { invoice, seller, customer, items, totals, brandName, logoDataUri } = data;
 
-  const sellerLines = [
+  const invDate = formatDateNL(invoice.created_at);
+  const dueDate = invoice.due_date ? formatDateOnlyNL(invoice.due_date) : null;
+  const statusStr = String(invoice.status ?? "").toUpperCase();
+
+  const sellerAddressLines = [
     seller.company_name,
-    seller.address_line1,
-    seller.address_line2,
-    [seller.postal_code, seller.city].filter(Boolean).join(" "),
+    safeLine(seller.address_line1, seller.address_line2),
+    safeLine(seller.postal_code, seller.city),
     seller.country,
-  ].filter(Boolean);
+  ].filter((x) => x && x.trim() !== "");
 
-  const metaLeft = [
-    seller.company_email ? `Email: ${seller.company_email}` : null,
-    seller.phone ? `Tel: ${seller.phone}` : null,
-    seller.vat_number ? `BTW: ${seller.vat_number}` : null,
-    seller.chamber_of_commerce ? `KvK: ${seller.chamber_of_commerce}` : null,
-    seller.iban ? `IBAN: ${seller.iban}` : null,
-  ].filter(Boolean);
+  const breakdown = (totals.vat_breakdown ?? []).filter((r) => r && Number.isFinite(r.rate));
+  const breakdownNonZero = breakdown.filter((r) => round2(r.rate) !== 0);
+  const notices = totals.notices ?? [];
 
-  const invDate = new Date(invoice.created_at).toLocaleDateString("nl-NL");
-  const dueDate = invoice.due_date ? new Date(invoice.due_date).toLocaleDateString("nl-NL") : null;
+  // ✅ key: force remount als logo verandert (React-PDF cache workaround)
+  const logoKey = logoDataUri ? logoDataUri.slice(0, 120) : "no-logo";
 
   return (
     <Document>
       <Page size="A4" style={styles.page}>
         {/* Header */}
-        <View style={styles.row}>
+        <View style={styles.headerRow}>
           <View>
-            <Text style={styles.h1}>{brandName}</Text>
-            <Text style={[styles.muted, { marginTop: 2 }]}>Factuur</Text>
-            <Text style={[styles.h2, { marginTop: 6 }]}>{invoice.invoice_number}</Text>
+            {logoDataUri ? (
+              <Image key={logoKey} src={logoDataUri} style={styles.logo} />
+            ) : (
+              <Text style={styles.brandFallback}>{brandName}</Text>
+            )}
           </View>
 
-          <View style={{ alignItems: "flex-end" }}>
-            <Text style={styles.muted}>Datum: {invDate}</Text>
-            {dueDate ? <Text style={styles.muted}>Vervaldatum: {dueDate}</Text> : null}
-            <Text style={styles.muted}>Status: {invoice.status}</Text>
+          <View>
+            <Text style={styles.meta}>Factuur: {invoice.invoice_number}</Text>
+            <Text style={styles.meta}>Datum: {invDate}</Text>
+            {dueDate ? <Text style={styles.meta}>Vervaldatum: {dueDate}</Text> : null}
+            <Text style={styles.meta}>Status: {statusStr}</Text>
           </View>
         </View>
 
-        <View style={styles.divider} />
-
-        {/* Addresses */}
-        <View style={styles.row}>
-          <View style={[styles.card, { flex: 1 }]}>
+        {/* Seller / Customer */}
+        <View style={[styles.section, styles.gridRow]}>
+          <View style={styles.box}>
             <Text style={styles.h2}>Van</Text>
-            {sellerLines.length ? (
-              sellerLines.map((l, idx) => <Text key={idx} style={{ marginTop: idx === 0 ? 6 : 2 }}>{l}</Text>)
+            {sellerAddressLines.length ? (
+              sellerAddressLines.map((line, idx) => <Text key={idx}>{line}</Text>)
             ) : (
-              <Text style={[styles.muted, { marginTop: 6 }]}>Vul je bedrijfsgegevens in via Instellingen.</Text>
+              <Text>—</Text>
             )}
-            {metaLeft.length ? (
-              <View style={{ marginTop: 8 }}>
-                {metaLeft.map((l, idx) => (
-                  <Text key={idx} style={[styles.muted, { marginTop: idx === 0 ? 0 : 2 }]}>{l}</Text>
-                ))}
-              </View>
-            ) : null}
+            {seller.company_email ? <Text>{seller.company_email}</Text> : null}
+            {seller.phone ? <Text>{seller.phone}</Text> : null}
+            {seller.vat_number ? <Text>BTW: {seller.vat_number}</Text> : null}
+            {seller.chamber_of_commerce ? <Text>KvK: {seller.chamber_of_commerce}</Text> : null}
+            {seller.iban ? <Text>IBAN: {seller.iban}</Text> : null}
           </View>
 
-          <View style={[styles.card, { flex: 1 }]}>
+          <View style={styles.box}>
             <Text style={styles.h2}>Aan</Text>
             {customer ? (
-              <View style={{ marginTop: 6 }}>
-                <Text style={{ fontWeight: "bold" }}>{customer.name}</Text>
-                {customer.address ? <Text style={{ marginTop: 2 }}>{customer.address}</Text> : null}
-                {customer.email ? <Text style={[styles.muted, { marginTop: 6 }]}>{customer.email}</Text> : null}
-                {customer.phone ? <Text style={styles.muted}>{customer.phone}</Text> : null}
-              </View>
+              <>
+                <Text>{customer.name}</Text>
+                {customer.email ? <Text>{customer.email}</Text> : null}
+                {customer.phone ? <Text>{customer.phone}</Text> : null}
+                {customer.address ? <Text>{customer.address}</Text> : null}
+              </>
             ) : (
-              <Text style={[styles.muted, { marginTop: 6 }]}>Klant niet gevonden.</Text>
+              <Text>Klant niet gevonden</Text>
             )}
           </View>
         </View>
 
         {/* Items */}
-        <View style={styles.tableHeader}>
-          <Text style={[styles.colDesc, styles.th]}>Omschrijving</Text>
-          <Text style={[styles.colQty, styles.th]}>Aantal</Text>
-          <Text style={[styles.colPrice, styles.th]}>Prijs</Text>
-          <Text style={[styles.colTotal, styles.th]}>Totaal</Text>
-        </View>
+        <View style={styles.section}>
+          <View style={styles.tableHeader}>
+            <Text style={styles.colDesc}>Omschrijving</Text>
+            <Text style={styles.colQty}>Aantal</Text>
+            <Text style={styles.colUnit}>Unit</Text>
+            <Text style={styles.colUnitPrice}>Prijs</Text>
+            <Text style={styles.colTotal}>Totaal</Text>
+          </View>
 
-        {items.length === 0 ? (
-          <Text style={[styles.muted, { marginTop: 10 }]}>Geen regels.</Text>
-        ) : (
-          items.map((it, idx) => {
-            const lineTotal = it.qty * it.unit_price;
-            return (
-              <View key={idx} style={styles.tr}>
-                <View style={styles.colDesc}>
-                  <Text style={{ fontWeight: "bold" }}>{it.description}</Text>
-                  {it.unit ? <Text style={styles.muted}>Unit: {it.unit}</Text> : null}
+          {items.length === 0 ? (
+            <View style={styles.row}>
+              <Text>Geen regels</Text>
+            </View>
+          ) : (
+            items.map((it, idx) => {
+              const lineTotal = it.qty * it.unit_price;
+              return (
+                <View key={idx} style={styles.row}>
+                  <Text style={styles.colDesc}>{it.description}</Text>
+                  <Text style={styles.colQty}>{it.qty}</Text>
+                  <Text style={styles.colUnit}>{it.unit ?? "—"}</Text>
+                  <Text style={styles.colUnitPrice}>{money(it.unit_price, totals.currency)}</Text>
+                  <Text style={styles.colTotal}>{money(lineTotal, totals.currency)}</Text>
                 </View>
-                <Text style={styles.colQty}>{it.qty.toString()}</Text>
-                <Text style={styles.colPrice}>{money(it.unit_price, totals.currency)}</Text>
-                <Text style={styles.colTotal}>{money(lineTotal, totals.currency)}</Text>
+              );
+            })
+          )}
+
+          {/* Totals */}
+          <View style={styles.totals}>
+            <View style={styles.totalLine}>
+              <Text>Subtotaal</Text>
+              <Text>{money(totals.subtotal, totals.currency)}</Text>
+            </View>
+
+            {breakdownNonZero.length > 0 ? (
+              breakdownNonZero.map((r) => (
+                <View key={`vat-${r.rate}`} style={styles.totalLine}>
+                  <Text>BTW ({round2(r.rate)}%)</Text>
+                  <Text>{money(r.vat, totals.currency)}</Text>
+                </View>
+              ))
+            ) : (
+              <View style={styles.totalLine}>
+                <Text>BTW ({Number.isFinite(totals.vat_rate) ? totals.vat_rate : 0}%)</Text>
+                <Text>{money(totals.vat_amount, totals.currency)}</Text>
               </View>
-            );
-          })
-        )}
+            )}
 
-        {/* Totals */}
-        <View style={styles.totalsBox}>
-          <View style={styles.totalsRow}>
-            <Text style={styles.muted}>{totals.prices_include_vat ? "Subtotaal (incl.)" : "Subtotaal"}</Text>
-            <Text style={{ fontWeight: "bold" }}>{money(totals.subtotal, totals.currency)}</Text>
+            <View style={styles.totalLine}>
+              <Text style={{ fontWeight: 700 }}>Totaal</Text>
+              <Text style={{ fontWeight: 700 }}>{money(totals.total, totals.currency)}</Text>
+            </View>
           </View>
-          <View style={styles.totalsRow}>
-            <Text style={styles.muted}>BTW ({totals.vat_rate}%)</Text>
-            <Text style={{ fontWeight: "bold" }}>{money(totals.vat_amount, totals.currency)}</Text>
-          </View>
-          <View style={[styles.totalsRow, { marginTop: 8 }]}>
-            <Text style={{ fontWeight: "bold", fontSize: 12 }}>Totaal</Text>
-            <Text style={{ fontWeight: "bold", fontSize: 12 }}>{money(totals.total, totals.currency)}</Text>
-          </View>
-          <View style={[styles.card, { marginTop: 12 }]}>
-  <Text style={styles.h2}>Betaling</Text>
-  <Text style={{ marginTop: 6 }}>
-    Graag betalen op IBAN: {seller.iban ?? "—"}
-  </Text>
-  <Text style={{ marginTop: 2 }}>
-    O.v.v. {invoice.invoice_number}
-  </Text>
-  {dueDate ? <Text style={{ marginTop: 2 }}>Vervaldatum: {dueDate}</Text> : null}
-</View>
 
+          {/* Notices */}
+          {notices.length > 0 ? (
+            <View style={styles.noticeBox}>
+              {notices.map((n, i) => (
+                <Text key={i} style={{ fontSize: 10 }}>
+                  {n}
+                </Text>
+              ))}
+            </View>
+          ) : null}
         </View>
 
-        {/* Notes / Footer */}
+        {/* Notes */}
         {invoice.notes ? (
-          <View style={[styles.card, { marginTop: 16 }]}>
+          <View style={styles.section}>
             <Text style={styles.h2}>Notities</Text>
-            <Text style={{ marginTop: 6 }}>{invoice.notes}</Text>
+            <Text>{invoice.notes}</Text>
           </View>
         ) : null}
 
-        {invoice.footer ? (
-          <View style={[styles.card, { marginTop: 10 }]}>
-            <Text style={styles.h2}>Footer</Text>
-            <Text style={{ marginTop: 6 }}>{invoice.footer}</Text>
-          </View>
-        ) : null}
+        {/* Footer */}
+        {invoice.footer ? <Text style={styles.footer}>{invoice.footer}</Text> : null}
       </Page>
     </Document>
   );
